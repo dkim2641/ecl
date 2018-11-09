@@ -43,6 +43,7 @@
 
 #include <ecl.h>
 #include <mathlib/mathlib.h>
+#include <geo_lookup/geo_mag_declination.h>
 #include <cstdlib>
 
 // Reset the velocity states. If we have a recent and valid
@@ -543,7 +544,7 @@ bool Ekf::realignYawGPS()
 }
 
 // Reset heading and magnetic field states
-bool Ekf::resetMagHeading(Vector3f &mag_init)
+bool Ekf::resetMagHeading(const Vector3f &mag_init)
 {
 	if (_params.mag_fusion_type >= MAG_FUSE_TYPE_NONE) {
 		// do not use the magnetomer and deactivate magnetic field states
@@ -554,8 +555,10 @@ bool Ekf::resetMagHeading(Vector3f &mag_init)
 		return false;
 	}
 
+	calcMagDeclination();
+
 	// save a copy of the quaternion state for later use in calculating the amount of reset change
-	Quatf quat_before_reset = _state.quat_nominal;
+	const Quatf quat_before_reset = _state.quat_nominal;
 	Quatf quat_after_reset = _state.quat_nominal;
 
 	// calculate the variance for the rotation estimate expressed as a rotation vector
@@ -575,18 +578,20 @@ bool Ekf::resetMagHeading(Vector3f &mag_init)
 
 		// Set the yaw angle to zero and calculate the rotation matrix from body to earth frame
 		euler321(2) = 0.0f;
-		Dcmf R_to_earth(euler321);
+		const Dcmf R_to_earth(euler321);
 
 		// calculate the observed yaw angle
 		if (_control_status.flags.ev_yaw) {
 			// convert the observed quaternion to a rotation matrix
-			Dcmf R_to_earth_ev(_ev_sample_delayed.quat);	// transformation matrix from body to world frame
+			const Dcmf R_to_earth_ev(_ev_sample_delayed.quat);	// transformation matrix from body to world frame
+
 			// calculate the yaw angle for a 312 sequence
 			euler321(2) = atan2f(R_to_earth_ev(1, 0), R_to_earth_ev(0, 0));
 
 		} else if (_params.mag_fusion_type <= MAG_FUSE_TYPE_AUTOFW) {
 			// rotate the magnetometer measurements into earth frame using a zero yaw angle
-			Vector3f mag_earth_pred = R_to_earth * _mag_sample_delayed.mag;
+			const Vector3f mag_earth_pred = R_to_earth * _mag_sample_delayed.mag;
+
 			// the angle of the projection onto the horizontal gives the yaw angle
 			euler321(2) = -atan2f(mag_earth_pred(1), mag_earth_pred(0)) + _mag_declination;
 
@@ -641,6 +646,7 @@ bool Ekf::resetMagHeading(Vector3f &mag_init)
 		} else if (_params.mag_fusion_type <= MAG_FUSE_TYPE_AUTOFW) {
 			// rotate the magnetometer measurements into earth frame using a zero yaw angle
 			Vector3f mag_earth_pred = R_to_earth * _mag_sample_delayed.mag;
+
 			// the angle of the projection onto the horizontal gives the yaw angle
 			euler312(0) = -atan2f(mag_earth_pred(1), mag_earth_pred(0)) + _mag_declination;
 
@@ -668,7 +674,7 @@ bool Ekf::resetMagHeading(Vector3f &mag_init)
 	}
 
 	// set the earth magnetic field states using the updated rotation
-	Dcmf _R_to_earth_after = quat_to_invrotmat(quat_after_reset);
+	const Dcmf _R_to_earth_after = quat_to_invrotmat(quat_after_reset);
 	_state.mag_I = _R_to_earth_after * mag_init;
 
 	// reset the corresponding rows and columns in the covariance matrix and set the variances on the magnetic field states to the measurement variance
@@ -683,11 +689,11 @@ bool Ekf::resetMagHeading(Vector3f &mag_init)
 	_flt_mag_align_start_time = _imu_sample_delayed.time_us;
 
 	// calculate the amount that the quaternion has changed by
-	Quatf q_error =  quat_before_reset.inversed() * quat_after_reset;
+	Quatf q_error = quat_before_reset.inversed() * quat_after_reset;
 	q_error.normalize();
 
 	// convert the quaternion delta to a delta angle
-	Vector3f delta_ang_error;
+
 	float scalar;
 
 	if (q_error(0) >= 0.0f) {
@@ -697,10 +703,7 @@ bool Ekf::resetMagHeading(Vector3f &mag_init)
 		scalar = 2.0f;
 	}
 
-	delta_ang_error(0) = scalar * q_error(1);
-	delta_ang_error(1) = scalar * q_error(2);
-	delta_ang_error(2) = scalar * q_error(3);
-
+	const Vector3f delta_ang_error{scalar * q_error(1), scalar * q_error(2), scalar * q_error(3)};
 
 	// update the quaternion state estimates and corresponding covariances only if the change in angle has been large
 	if (delta_ang_error.norm() > math::radians(15.0f)) {
@@ -760,18 +763,16 @@ void Ekf::calcMagDeclination()
 	} else if (_params.mag_declination_source & MASK_USE_GEO_DECL) {
 		// use parameter value until GPS is available, then use value returned by geo library
 		if (_NED_origin_initialised) {
-			_mag_declination = _mag_declination_gps;
-			_mag_declination_to_save_deg = math::degrees(_mag_declination);
+			// set the magnetic declination returned by the geo library using the current GPS position
+			_mag_declination = math::radians(get_mag_declination(math::degrees(_gps_pos_prev.lat_rad), math::degrees(_gps_pos_prev.lon_rad)));
 
 		} else {
 			_mag_declination = math::radians(_params.mag_declination_deg);
-			_mag_declination_to_save_deg = _params.mag_declination_deg;
 		}
 
 	} else {
 		// always use the parameter value
 		_mag_declination = math::radians(_params.mag_declination_deg);
-		_mag_declination_to_save_deg = _params.mag_declination_deg;
 	}
 }
 
